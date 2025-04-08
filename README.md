@@ -9,3 +9,5 @@ This project applies Natural Language Processing (NLP) techniques to analyze Iri
 - Conducting keyness analysis to compare word usage between political groups.
 
 The project uses R and leverages libraries such as `quanteda`, `dplyr`, and `ggplot2` for text analysis and visualization. The results provide insights into housing mentions, sentiment trends, and linguistic differences across party manifestos.
+
+Note: The easiest way to view this file (written using R and Quarto) is to download the HTML file to your local drive and view it with your browser.
