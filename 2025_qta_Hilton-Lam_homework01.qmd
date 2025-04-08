@@ -1,0 +1,389 @@
+---
+Title: "Analysing Irish Political Party Manifestos - A NLP Analysis"
+Author: "Hilton Lam"
+format:
+    html:
+        self-contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Analysing Irish Political Party Manifestos With NLP Methods
+
+Author: Hilton Lam
+
+Date: Feb 2025
+
+
+## Data Exploration
+
+```{r}
+library(quanteda)
+library(dplyr)
+
+# Change working directory to my folder in R terminal
+setwd("/Users/hiltonlam/Documents/GitHub/nlp-project-1")  
+
+data_ie_corpus <- read.csv("Ireland_Corpus2.0.csv")
+
+#  Preview the dataset
+str(data_ie_corpus)
+unique(data_ie_corpus$date)
+
+# Count number of manifestos by party and date
+num_manifestos <- data_ie_corpus |>
+    distinct(partyname, date) |>
+    count(partyname, date)
+
+print(num_manifestos) # There are 10 manifestos in total, 9 manifestos for 9 parties in 2024 and 1 more for Aontu in 2020
+
+# Turn the dataframe into text corpus
+ie_corpus <- corpus(
+    data_ie_corpus
+    ,text_field = "text"
+)
+
+# Filter to only 2024 manifestos
+ie_corpus_2024 <- corpus_subset(
+    ie_corpus,
+    date == "202411"
+)
+
+# check out the corpus
+str(ie_corpus_2024)
+
+```
+
+
+## Corpus Pre-Processing
+
+Create a dictionary on terms and phrases related to housing policy
+
+```{r}
+
+# create a dictionary using the link above and ChatGPT for identifying the terms
+housing_dict <- dictionary(list(
+housing = c("rental", "property sale", "housing rental", "rental housing", "housing for sale","affordable purchase scheme","social housing","approved housing bodies","cost rental","housing assistance payment","housing assistance","housing support","housing policy","housing plan","housing strategy","housing development","housing construction","housing supply","housing demand","housing crisis","housing shortage","housing affordability","differential rent","first home scheme","help to buy","housing assistance","local authority home","mortgage to rent","rental accommodation","rent supplement")))
+
+# check out structure
+housing_dict
+
+```
+
+Number of sentences per manifesto
+
+```{r}
+library(dplyr)
+
+# To understand the data structure again. I can now see that each line/document is actually one sentence, represented by sentence_id. Since each party only has one manifesto, then I can count the number of sentences per manifesto that way.
+str(ie_corpus_2024)
+
+# Convert the corpus to a data frame
+df_corpus <- convert(ie_corpus_2024, to = "data.frame")
+
+# Count the number of sentences per party
+sentence_counts <- df_corpus %>%
+  group_by(partyname) %>%
+  count(name = "sentence_count") %>%
+  arrange(desc(sentence_count))
+
+sentence_counts
+
+```
+
+_Therefore, we can see that the manifesto with the highest number of sentences is Labour and the lowest is Independent Ireland._
+
+Tokenize the corpus without any preprocessing. 
+
+```{r}
+
+toks_noprocessing <- tokens(ie_corpus_2024)
+
+```
+
+Apply the dictionary created above to the tokens object of Irish party manifestos, then create a dfm. 
+
+```{r}
+# Check that the dictionary works properly
+# kwic(toks_noprocessing, pattern = phrase(housing_dict))
+
+# Apply the dictionary to the tokens object using tokens_lookup
+tokens_housing <- tokens_lookup(toks_noprocessing, dictionary = housing_dict, nested_scope = "dictionary")
+
+# Create a dfm from the tokens object
+dfm_housing <- dfm(tokens_housing)
+
+```
+
+Apply Boolean weighting to the dfm and convert to a data frame.
+
+```{r}
+
+dfm_boolean <- dfm_weight(dfm_housing, scheme = "boolean")
+
+# Convert dfm to a data frame
+dfm_df <- convert(dfm_boolean, to = "data.frame")
+
+```
+
+
+Aggregate the scores to the level of manifestos and then calculate the mean of the housing variable from the data frame.
+
+```{r}
+
+# Aggregate the sum of the housing column by partyname and date in df_corpus
+
+housing_mention_agg <- 
+  left_join(df_corpus, dfm_df, by = "doc_id") |>
+  group_by(partyname, date) |>
+  summarise(total_housing = sum(housing, na.rm = TRUE))
+
+# head(dfm_df)
+
+# View the aggregated housing data
+print(housing_mention_agg)
+
+```
+
+## Data Visualisation
+
+Create a plot to housing mentions by party.
+
+```{r}
+library(ggplot2)
+
+# Create a bar chart
+ggplot(housing_mention_agg, aes(x = total_housing, y = reorder(partyname, total_housing))) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Housing Mentions by Party",
+    x = "Total Housing Mentions",
+    y = "Party Name"
+  ) +
+  theme_bw()
+
+```
+
+_From this plot, we can see that the Labour party has the highest number of housing mentions in 2024, followed by the Fine Gael and Sinn Fein._
+
+## Sentiment Analysis
+
+Apply the Lexicoder Sentiment Dictionary (`data_dictionary_LSD2015`, included in **quanteda**) to the sentence-level party manifestos. Then I will use the formula suggested by Proksch et al. (2019, Legislative Studies Quarterly) to calculate a sentiment score for each sentence. 
+
+```{r}
+df_sentiment <- toks_noprocessing |>
+    tokens_lookup(dictionary = data_dictionary_LSD2015, nested_scope = "dictionary") |>
+    dfm() |>
+    convert(to = "data.frame")
+
+# Caculate the sentiment score
+df_sentiment <- df_sentiment |>
+  mutate(sentiment = log((positive + neg_negative + 0.5) /
+  (negative + neg_positive + 0.5)))
+
+head(df_sentiment, 5)
+```
+
+
+Merge the data frame from the previous question with the data frame created previously to get more meta data.
+
+```{r}
+library(dplyr)
+
+# Convert housing dfm to df
+df_housing <- convert(dfm_housing, to = "data.frame")
+# head(df_housing)
+
+# Merge the dataframes
+merged_df <- left_join(df_housing, df_sentiment, by = "doc_id")
+
+head(merged_df)
+```
+
+
+## Linear Regression to Predict Sentiment Score
+
+Transform the binary indicator of housing (1/0) into a factor variable, housing_factor, taking the value "Housing" when the variable takes the value 1 and "Other Policy Area" if the value is 0. 
+
+Run a linear regression model to predict the sentence-level sentiment score.
+
+```{r}
+
+# Transform the binary indicator of housing into a factor variable
+merged_df$housing_factor <- factor(merged_df$housing, levels = c(0, 1), labels = c("Other Policy Area", "Housing"))
+head(merged_df)
+
+# Display the unique values (levels) in the factor housing_factor
+unique_levels <- levels(merged_df$housing_factor)
+print(unique_levels)
+
+# Select only the doc_id and partyname columns from df_corpus
+df_corpus_selected <- df_corpus |> select(doc_id, partyname)
+
+# Merge the data frames using left_join
+merged_df <- left_join(merged_df, df_corpus_selected, by = "doc_id")
+
+# Rename the column from partyname to manifesto
+merged_df <- merged_df |> rename(manifesto = partyname)
+
+# Check the structure of the merged data frame
+str(merged_df)
+head(merged_df)
+
+# Change the manifesto variable to a factor
+merged_df$manifesto <- factor(merged_df$manifesto)
+
+# See all unique values
+unique_levels <- levels(merged_df$manifesto)
+print(unique_levels)
+
+# Run a linear regression model with manifesto fixed effects
+model <- lm(sentiment ~ housing_factor + manifesto, data = merged_df)
+
+```
+
+Output of the regression model
+
+```{r}
+summary(model)
+
+```
+
+## Cleaning up misclassified keywords
+
+_Since housing_factor has a positive coefficient (0.05655) in the model, it implies that the sentiment in housing-related statements is more positive than in other statements. However, the p-value of the coefficient is less than 0.05, which indicates that the coefficient is not statistically significant. In other words, we cannot conclusively say that housing-related statements has a real impact on sentiment.
+
+This model has a very low R-squared (0.06446), indicating that the model explains very little variance in sentiment.
+
+However, the manifesto fixed effects are statistically significant, indicating that the sentiment score varies across different manifestos. The manifesto factor is a better indicator of sentence-level sentiment than housing factor._
+
+Use `tokens_keep()` to select only negative terms from "toks_noprocessing" (`data_dictionary_LS2015$negative`). Then transform the object to a dfm and get the 100 most frequent negative terms. Identify terms that have been misclassified in this context. 
+
+```{r}
+tokens_negative <- tokens_keep(toks_noprocessing, pattern = data_dictionary_LSD2015$negative)
+
+#  Transform the tokens object to a dfm
+dfm_negative <- dfm(tokens_negative)
+
+# Get the 100 most frequent negative terms
+top_negative_terms <- topfeatures(dfm_negative, 100)
+
+# See output
+print(top_negative_terms)
+
+```
+
+Remove the terms that do not express positive or negative sentiment from the "toks_noprocessing" tokens object (using `tokens_remove()`), apply the dictionary again, and repeat the steps above to review the output of the regression model.
+
+```{r}
+# See the top positive terms
+tokens_positive <- tokens_keep(toks_noprocessing, pattern = data_dictionary_LSD2015$positive)
+dfm_positive <- dfm(tokens_positive)
+top_positive_terms <- topfeatures(dfm_positive, 100)
+print(top_positive_terms)
+
+# A list of terms that shouldn't be classified as positive or negative
+non_sentiment_terms <- c("ireland", "ireland's", "artificial", "neutrality")
+
+# Remove those terms 
+toks_cleaned <- tokens_remove(toks_noprocessing, pattern = non_sentiment_terms)
+
+# Apply sentiment dictionary
+df_sentiment_cleaned <- toks_cleaned |>
+    tokens_lookup(dictionary = data_dictionary_LSD2015, nested_scope = "dictionary") |>
+    dfm() |>
+    convert(to = "data.frame")
+
+# Calculate the sentiment score
+df_sentiment_cleaned <- df_sentiment_cleaned |>
+  mutate(sentiment = log((positive + neg_negative + 0.5) /
+  (negative + neg_positive + 0.5)))
+
+# head(df_sentiment_cleaned)
+
+# Merged the dataframes 
+merged_df_cleaned <- left_join(df_sentiment_cleaned, df_corpus_selected, by = "doc_id")
+
+# Add the housing_factor from merged_df (previous df) to merged_df_cleaned with cleaned up keywords
+merged_df_cleaned <- left_join(merged_df_cleaned, merged_df |> select(doc_id, housing_factor), by = "doc_id")
+
+# Rename partyname to manifesto
+merged_df_cleaned <- merged_df_cleaned |> rename(manifesto = partyname)
+
+# Convert the manifesto variable to a factor
+merged_df_cleaned$manifesto <- factor(merged_df_cleaned$manifesto)
+
+# Preview the datasaet
+head(merged_df_cleaned)
+str(merged_df_cleaned)
+
+# Run the linear regression model
+model_cleaned <- lm(sentiment ~ housing_factor + manifesto, data = merged_df_cleaned)
+
+# Summarize the model
+summary(model_cleaned)
+
+```
+
+_Excluding the chosen keywords from the sentiment dictionary did not affect the substantive conclusions drawn from the linear regression model. The coefficient for housing_factor remained positive, though at a smaller value, indicating that the sentiment in housing-related statements is more positive than in other statements. However, the p-value for the housing_factor coefficient is still high (0.79), suggesting that housing-related statements may not have a real impact on sentiment. The manifesto fixed effects remained statistically significant, indicating that the sentiment score varies across different manifestos. R-squared for the model (0.06825) is still low, just slightly higher than the original model, suggesting that this linear regression can only explain a small amount of the variance in sentiment._
+
+##  Keyness analysis
+
+Create a new document-level variable that takes the values "FF/FG" for Fianna Fáil and Fine Gael manifestos, and the value "Other Parties" for all other manifestos. Tokenize this text corpus. Then create a dfm, and group this dfm by the new document-level variable (ffg_other).
+
+```{r}
+
+# Create a new document-level variable
+docvars(ie_corpus_2024, "ffg_other") <- ifelse(docvars(ie_corpus_2024, "partyname") %in% c("Fianna Fáil", "Fine Gael"), "FF/FG", "Other Parties")
+
+# Tokenize the text corpus
+toks_gov_opp <- tokens(ie_corpus_2024)
+
+# Create a dfm
+dfm_gov_opp <- dfm(toks_gov_opp)
+
+# Ensure the document-level variable is correctly assigned
+docvars(dfm_gov_opp, "ffg_other") <- docvars(ie_corpus_2024, "ffg_other")
+
+# Check the length of the groups variable
+length(docvars(dfm_gov_opp, "ffg_other"))
+length(docnames(dfm_gov_opp))
+
+# Group the dfm by the new document-level variable
+dfm_grouped <- dfm_group(dfm_gov_opp, groups = docvars(dfm_gov_opp, "ffg_other"))
+
+# Check the structure of the grouped dfm
+print(dfm_grouped)
+
+```
+
+Run a keyness analysis using the textstat_keyness() function from the **quanteda.textstsats** package on this grouped dfm. 
+
+```{r}
+
+library(quanteda.textstats)
+
+# Run keyness analysis
+keyness_result <- textstat_keyness(dfm_grouped, target = "FF/FG")
+
+# View the keyness result
+head(keyness_result)
+
+```
+
+Use the `textplot_keyness()` functions from **quanteda.textplots** and show differences in word usage between Fianna Fáil/Fine Gael and all other parties. 
+
+```{r, fig.height = 8}
+
+library(quanteda.textplots)
+
+# Run a keyness analysis
+keyness_result <- textstat_keyness(dfm_grouped, target = "FF/FG")
+
+# Plot the keyness result
+textplot_keyness(keyness_result, n = 20)
+
+```
+
